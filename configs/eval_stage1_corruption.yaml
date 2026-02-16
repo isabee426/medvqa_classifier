@@ -1,0 +1,18 @@
+# Evaluation config for Stage 1 corruption classifier
+
+classifier:
+  hidden_dim: 512
+  num_layers: 4
+  dropout: 0.25
+  activation: gelu
+  num_classes: 1
+
+eval:
+  checkpoint_path: outputs/checkpoints/stage1_corruption/best_model.pt
+  features_dir: outputs/features/vqarad_stage1
+  splits: [test]
+  label_type: corruption
+  output_dir: outputs/eval/stage1_corruption
+  device: cpu
+  batch_size: 128
+  dump_scores: true

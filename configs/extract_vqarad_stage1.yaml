@@ -1,0 +1,29 @@
+# Feature extraction config for VQA-RAD Stage 1 (corruption classifier)
+
+data:
+  dataset_name: vqa-rad
+  hf_dataset_id: flaviagiammarino/vqa-rad
+  use_local: false
+  splits: [train, test]
+  max_examples_per_split: null  # null = use all
+
+corruption:
+  enabled: true
+  seed: 42
+  strategies:
+    swap_answer: 0.3
+    swap_image: 0.25
+    empty_answer: 0.2
+    distort_answer: 0.25
+  negatives_per_positive: 1
+
+extraction:
+  model_name_or_path: Salesforce/blip-image-captioning-base
+  layers: [2, 6, 10]  # early / middle / late (12 layers total)
+  pooling: mean
+  segments: [vision, question, answer]
+  batch_size: 1
+  device: cpu
+  dtype: float32
+  output_dir: outputs/features/vqarad_stage1
+  save_every_n: 50
