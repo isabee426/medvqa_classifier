@@ -26,22 +26,40 @@ VQA-RAD dataset
 
 | Metric | Score |
 |--------|-------|
-| ROC-AUC | **0.817** |
-| Accuracy | 75.4% |
-| Precision | 74.3% |
-| Recall | 77.6% |
-| F1 | 75.9% |
-| PR-AUC | 74.3% |
-| ECE (calibration) | 0.066 |
+| ROC-AUC | **0.8227** |
+| Accuracy | 74.4% |
+| Precision | 73.6% |
+| Recall | 76.1% |
+| F1 | 74.8% |
+| PR-AUC | 75.8% |
+| ECE (calibration) | 0.065 |
+
+**Ablations** (test set ROC-AUC):
+
+| Config | AUC |
+|--------|-----|
+| Logistic Regression baseline | 0.697 |
+| MLP 4L/512, wd=0.01 (original) | 0.817 |
+| MLP 4L/512, wd=0.05, noise=0.02 (v3) | 0.8159 |
+| MLP 2L/256, wd=0.10, noise=0.03 (v4) | 0.8133 |
+| **MLP 3L/512, wd=0.05, noise=0.02 (v5)** | **0.8227** |
 
 ## Setup
 
+**Local (Python venv):**
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 pip install -e .
+```
+
+**Docker (extract → train → eval pipeline):**
+```bash
+docker compose run --rm extract   # extracts features
+docker compose run --rm train     # trains classifier
+docker compose run --rm eval      # evaluates checkpoint
 ```
 
 ## Usage
@@ -85,9 +103,11 @@ python -m medvqa_probe eval_classifier --config configs/eval_stage1_corruption.y
 - **distort_answer**: Swap anatomy/finding terms (e.g., lung->liver, left->right, benign->malignant)
 
 ### Classifier
-- 4-layer residual MLP with LayerNorm, GELU activation, and dropout
+- 3-layer residual MLP with LayerNorm, GELU activation, and dropout (0.30)
 - Input feature standardization (zero mean, unit variance)
-- BCE loss with AdamW optimizer, cosine LR schedule with linear warmup
+- Gaussian noise augmentation on features during training (noise_std=0.02)
+- BCE loss with AdamW optimizer (weight_decay=0.05), cosine LR schedule with linear warmup
+- Early stopping on val AUC (patience=15)
 - Gradient clipping (max_norm=1.0)
 - Post-hoc temperature scaling (Platt scaling) for calibration
 
@@ -113,6 +133,8 @@ configs/
   extract_vqarad_stage1.yaml
   train_stage1_corruption.yaml
   eval_stage1_corruption.yaml
+scripts/
+  sklearn_baseline.py          # LR baseline for sanity-checking nonlinearity
 tests/
   test_config.py
   test_data.py
