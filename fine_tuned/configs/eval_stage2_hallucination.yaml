@@ -1,0 +1,19 @@
+# Evaluation config for Stage-2 hallucination classifier
+
+classifier:
+  hidden_dim: 512
+  num_layers: 3
+  dropout: 0.30
+  activation: gelu
+  num_classes: 1
+
+eval:
+  checkpoint_path: outputs/checkpoints/stage2_hallucination/best_model.pt
+  features_dirs:
+    - outputs/features/halt_medvqa_hallucination
+  label_type: hallucination
+  splits: [test]
+  output_dir: outputs/eval/stage2_hallucination
+  device: cpu
+  batch_size: 128
+  dump_scores: true

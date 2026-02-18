@@ -22,6 +22,7 @@ class DataConfig:
     use_local: bool = False
     splits: list[str] = field(default_factory=lambda: ["train", "test"])
     max_examples_per_split: int | None = None  # None = use all
+    label_type: Literal["corruption", "hallucination"] = "corruption"
 
 
 @dataclass
@@ -85,12 +86,16 @@ class TrainingConfig:
     seed: int = 42
     num_workers: int = 0
     device: str = "cuda"
+    pretrained_checkpoint: str | None = None  # Stage-1 .pt path for warm-start
+    freeze_first_n_layers: int = 0  # freeze first N MLP layers during fine-tuning
+    features_dirs: list[str] = field(default_factory=list)  # multi-dir loading
 
 
 @dataclass
 class EvalConfig:
     checkpoint_path: str = ""
     features_dir: str = "outputs/features"
+    features_dirs: list[str] = field(default_factory=list)  # multi-dir eval (Stage-2)
     splits: list[str] = field(default_factory=lambda: ["test"])
     label_type: Literal["corruption", "hallucination"] = "corruption"
     output_dir: str = "outputs/eval"

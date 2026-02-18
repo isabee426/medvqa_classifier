@@ -1,0 +1,29 @@
+# Feature extraction config for HALT-MedVQA (VQA-RAD radiology subset only)
+#
+# Setup:
+#   1. Download VQA-RAD images from https://osf.io/89kps/
+#      Unpack to get a folder of synpic*.jpg files (e.g. data/VQA_RAD_Image_Folder/)
+#   2. Set local_data_dir below to that folder path
+#   3. HALT JSONs are auto-downloaded from GitHub (knowlab/halt-medvqa)
+#
+# If local_data_dir is null, falls back to synthetic HALT-style labels
+# using VQA-RAD from HuggingFace (no original filenames needed).
+
+data:
+  dataset_name: halt-medvqa
+  hf_dataset_id: "flaviagiammarino/vqa-rad"  # used by synthetic fallback
+  local_data_dir: data/VQA_RAD_Image_Folder  # VQA-RAD images with original synpic*.jpg filenames
+  splits: [train, test]
+  max_examples_per_split: null  # use all
+  label_type: hallucination
+
+extraction:
+  model_name_or_path: Salesforce/blip-image-captioning-base
+  output_dir: outputs/features/halt_medvqa_hallucination
+  layers: [2, 6, 10]  # must match Stage-1 (BLIP has layers 0-11)
+  segments: [vision, question, answer]
+  pooling: mean
+  device: cpu
+  dtype: float32
+  batch_size: 1
+  save_every_n: 50

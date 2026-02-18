@@ -1,0 +1,31 @@
+# Training config for Stage-2 hallucination classifier (HALT-MedVQA)
+
+classifier:
+  hidden_dim: 512
+  num_layers: 3
+  dropout: 0.30
+  activation: gelu
+  num_classes: 1
+
+training:
+  label_type: hallucination
+  features_dirs:
+    - outputs/features/halt_medvqa_hallucination
+  pretrained_checkpoint: outputs/checkpoints/stage1_v5/best_model.pt
+  epochs: 30
+  batch_size: 32
+  lr: 0.0001
+  weight_decay: 0.05
+  scheduler: cosine
+  warmup_steps: 50
+  loss: bce
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+  class_weights: null
+  checkpoint_dir: outputs/checkpoints/stage2_hallucination
+  checkpoint_metric: val_auc
+  patience: 10
+  noise_std: 0.02
+  seed: 0
+  num_workers: 0
+  device: cpu
