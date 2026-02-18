@@ -68,7 +68,8 @@ def run(cfg: FullConfig) -> None:
         logger.error("No training records found in %s. Run extract_features first.", features_dir)
         sys.exit(1)
 
-    train_ds = FeatureDataset(train_records)
+    noise_std = getattr(tcfg, "noise_std", 0.0) or 0.0
+    train_ds = FeatureDataset(train_records, noise_std=noise_std)
     val_ds = FeatureDataset(val_records, mean=train_ds.mean.numpy(), std=train_ds.std.numpy()) if val_records else None
     logger.info("Train: %d examples, feature_dim=%d, labels=%s",
                 len(train_ds), train_ds.feature_dim, train_ds.label_distribution())
@@ -93,6 +94,8 @@ def run(cfg: FullConfig) -> None:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_metric = -float("inf")
     best_epoch = -1
+    no_improve = 0
+    patience = getattr(tcfg, "patience", 0) or 0
     history: list[dict] = []
 
     for epoch in range(1, tcfg.epochs + 1):
@@ -161,8 +164,14 @@ def run(cfg: FullConfig) -> None:
         if metric_val > best_metric:
             best_metric = metric_val
             best_epoch = epoch
+            no_improve = 0
             torch.save(model.state_dict(), ckpt_dir / "best_model.pt")
             logger.info("  -> New best (%.4f) — saved checkpoint.", best_metric)
+        else:
+            no_improve += 1
+            if patience > 0 and no_improve >= patience:
+                logger.info("Early stopping: no improvement for %d epochs.", patience)
+                break
 
     # ---- Save final artifacts -------------------------------------------
     torch.save(model.state_dict(), ckpt_dir / "final_model.pt")

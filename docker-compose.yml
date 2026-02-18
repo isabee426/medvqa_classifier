@@ -1,0 +1,46 @@
+services:
+
+  # ── Step 1: extract internal features from BLIP ──────────────────────────
+  # Build is defined here only; train + eval reuse the same image.
+  extract:
+    build: .
+    image: medvqa-probe:latest
+    working_dir: /app
+    command: python -m medvqa_probe extract_features --config configs/extract_vqarad_stage1.yaml
+    volumes:
+      - .:/app                                    # source + outputs land on your host
+      - hf_cache:/root/.cache/huggingface         # cache model weights across runs
+    environment:
+      - PYTHONUNBUFFERED=1
+      - HF_HOME=/root/.cache/huggingface
+
+  # ── Step 2: train the MLP classifier ─────────────────────────────────────
+  train:
+    image: medvqa-probe:latest                    # reuse image built by extract
+    working_dir: /app
+    command: python -m medvqa_probe train_classifier --config configs/train_stage1_corruption.yaml
+    volumes:
+      - .:/app
+      - hf_cache:/root/.cache/huggingface
+    environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      extract:
+        condition: service_completed_successfully
+
+  # ── Step 3: evaluate and produce metrics / plots ─────────────────────────
+  eval:
+    image: medvqa-probe:latest                    # reuse image built by extract
+    working_dir: /app
+    command: python -m medvqa_probe eval_classifier --config configs/eval_stage1_corruption.yaml
+    volumes:
+      - .:/app
+      - hf_cache:/root/.cache/huggingface
+    environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      train:
+        condition: service_completed_successfully
+
+volumes:
+  hf_cache:    # named volume — persists the ~2 GB BLIP model between runs

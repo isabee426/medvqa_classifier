@@ -2,17 +2,17 @@
 
 classifier:
   hidden_dim: 512
-  num_layers: 4
-  dropout: 0.25
+  num_layers: 3
+  dropout: 0.30
   activation: gelu
   num_classes: 1
 
 eval:
-  checkpoint_path: outputs/checkpoints/stage1_corruption/best_model.pt
-  features_dir: outputs/features/vqarad_stage1
+  checkpoint_path: outputs/checkpoints/stage1_v5/best_model.pt
+  features_dir: outputs/features/vqarad_stage1_hidden_only
   splits: [test]
   label_type: corruption
-  output_dir: outputs/eval/stage1_corruption
+  output_dir: outputs/eval/stage1_v5
   device: cpu
   batch_size: 128
   dump_scores: true

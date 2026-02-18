@@ -1,29 +1,31 @@
 # Training config for Stage 1 corruption classifier
 
 extraction:
-  output_dir: outputs/features/vqarad_stage1  # where features live
+  output_dir: outputs/features/vqarad_stage1_hidden_only  # hidden-only features
 
 classifier:
   hidden_dim: 512
-  num_layers: 4
-  dropout: 0.25
+  num_layers: 3
+  dropout: 0.30
   activation: gelu
   num_classes: 1  # binary
 
 training:
   label_type: corruption
-  epochs: 80
+  epochs: 100
   batch_size: 32
   lr: 0.0005
-  weight_decay: 0.01
+  weight_decay: 0.05
   scheduler: cosine
   warmup_steps: 100
   loss: bce
   focal_alpha: 0.25
   focal_gamma: 2.0
   class_weights: null
-  checkpoint_dir: outputs/checkpoints/stage1_corruption
+  checkpoint_dir: outputs/checkpoints/stage1_v5
   checkpoint_metric: val_auc
-  seed: 42
+  patience: 15
+  noise_std: 0.02
+  seed: 0
   num_workers: 0
   device: cpu

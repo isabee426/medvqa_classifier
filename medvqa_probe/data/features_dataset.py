@@ -142,7 +142,13 @@ def load_feature_records(
 class FeatureDataset(Dataset):
     """Thin PyTorch Dataset over a list of :class:`FeatureRecord`."""
 
-    def __init__(self, records: list[FeatureRecord], mean: np.ndarray | None = None, std: np.ndarray | None = None) -> None:
+    def __init__(
+        self,
+        records: list[FeatureRecord],
+        mean: np.ndarray | None = None,
+        std: np.ndarray | None = None,
+        noise_std: float = 0.0,
+    ) -> None:
         self.ids = [r.id for r in records]
         self.features = torch.from_numpy(
             np.stack([r.features for r in records])
@@ -151,6 +157,7 @@ class FeatureDataset(Dataset):
             [r.label for r in records], dtype=torch.float32,
         )
         self.corruption_types = [r.corruption_type for r in records]
+        self.noise_std = noise_std  # Gaussian noise applied at __getitem__ time
 
         # Standardize features (zero mean, unit variance).
         if mean is None:
@@ -165,9 +172,12 @@ class FeatureDataset(Dataset):
         return len(self.ids)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
+        feat = self.features[idx]
+        if self.noise_std > 0.0:
+            feat = feat + torch.randn_like(feat) * self.noise_std
         return {
             "id": self.ids[idx],
-            "features": self.features[idx],
+            "features": feat,
             "label": self.labels[idx],
         }
 

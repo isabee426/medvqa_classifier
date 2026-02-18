@@ -19,7 +19,7 @@ from tqdm import tqdm
 from medvqa_probe.data.corruptions import generate_corrupted_examples
 from medvqa_probe.data.features_dataset import FeatureRecord, FeatureStore
 from medvqa_probe.data.vqarad_loader import Example, load_vqarad
-from medvqa_probe.models.base_vqa_model import HFVLMModel, pool_activations
+from medvqa_probe.models.base_vqa_model import HFVLMModel, pool_activations, pool_attention_maps
 from medvqa_probe.utils.config import FullConfig, load_config
 from medvqa_probe.utils.logging import setup_logging
 
@@ -91,7 +91,7 @@ def run(cfg: FullConfig) -> None:
 
         out = model.forward(image, example.question, example.answer)
 
-        features = pool_activations(
+        hidden_features = pool_activations(
             activations=out.activations,
             vision_mask=out.vision_mask,
             question_mask=out.question_mask,
@@ -100,6 +100,19 @@ def run(cfg: FullConfig) -> None:
             segments=ext.segments,
             pooling=ext.pooling,
         )
+
+        if getattr(ext, "use_attention", False) and out.attentions:
+            attention_features = pool_attention_maps(
+                attentions=out.attentions,
+                vision_mask=out.vision_mask,
+                question_mask=out.question_mask,
+                answer_mask=out.answer_mask,
+                layers=ext.layers,
+                reduction=getattr(ext, "attention_reduction", "mean"),
+            )
+            features = np.concatenate([hidden_features, attention_features])
+        else:
+            features = hidden_features
 
         store.append(FeatureRecord(
             id=example.id,

@@ -49,6 +49,8 @@ class ExtractionConfig:
     dtype: str = "float16"  # "float16" | "bfloat16" | "float32"
     output_dir: str = "outputs/features"
     save_every_n: int = 50  # flush to disk every N examples
+    use_attention: bool = False  # extract cross-modal attention maps (VADE-inspired)
+    attention_reduction: str = "entropy"  # "mean", "max", "entropy"
 
 
 @dataclass
@@ -78,6 +80,8 @@ class TrainingConfig:
     class_weights: list[float] | None = None
     checkpoint_dir: str = "outputs/checkpoints"
     checkpoint_metric: str = "val_auc"
+    patience: int = 0  # early stopping; 0 = disabled
+    noise_std: float = 0.0  # Gaussian noise on features during training; 0 = disabled
     seed: int = 42
     num_workers: int = 0
     device: str = "cuda"
