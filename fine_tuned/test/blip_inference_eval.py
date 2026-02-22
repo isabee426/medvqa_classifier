@@ -3,17 +3,25 @@
 Pipeline:
   1. Load VQA-RAD questions NOT used in training (HuggingFace test split).
   2. Run BLIP .generate() to get the model's actual answer for each question.
-  3. Normalize and compare to ground truth → binary label
-       0 = BLIP answered correctly (faithful)
-       1 = BLIP answered incorrectly (hallucinated)
+  3. LLM judge scores each (question, gold, blip_answer) triple → 0.0–1.0
+       score >= 0.5  → label=0 (correct / faithful)
+       score <  0.5  → label=1 (wrong / hallucinated)
   4. Extract hidden states from those same (image, question, blip_answer) triples.
   5. Apply the Stage-2 probe → report AUC.
 
-This is the most principled eval: no synthetic labels, real model errors.
+This is the most principled eval: no synthetic labels, real model errors,
+semantically-aware correctness scoring via an LLM judge.
 
 Usage:
     python -m fine_tuned.test.blip_inference_eval \
         --checkpoint outputs/checkpoints/stage2_hallucination/best_model.pt \
+        --output outputs/eval/blip_inference \
+        --device cuda
+
+    # Use a different judge model (default: Qwen/Qwen2.5-1.5B-Instruct):
+    python -m fine_tuned.test.blip_inference_eval \
+        --checkpoint outputs/checkpoints/stage2_hallucination/best_model.pt \
+        --judge_model Qwen/Qwen2.5-7B-Instruct \
         --output outputs/eval/blip_inference \
         --device cuda
 """
@@ -22,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from pathlib import Path
 
 import numpy as np
@@ -35,39 +42,81 @@ from medvqa_probe.utils.logging import setup_logging
 logger = setup_logging(name=__name__)
 
 MODEL_ID = "Salesforce/blip-image-captioning-base"
+DEFAULT_JUDGE = "Qwen/Qwen2.5-1.5B-Instruct"
 LAYERS = [2, 6, 10]
 
+JUDGE_PROMPT = """\
+You are a medical VQA evaluator. Given a question, a gold answer, and a predicted answer, \
+decide whether the predicted answer is semantically correct.
 
-# ---------------------------------------------------------------------------
-# Answer normalization
-# ---------------------------------------------------------------------------
+Question: {question}
+Gold answer: {gold}
+Predicted answer: {pred}
 
-def _normalize(answer: str) -> str:
-    """Lowercase, strip punctuation, collapse whitespace."""
-    answer = answer.lower().strip()
-    answer = re.sub(r"[^\w\s]", "", answer)
-    answer = re.sub(r"\s+", " ", answer).strip()
-    return answer
-
-
-def _answers_match(pred: str, gold: str) -> bool:
-    """Check if BLIP's answer matches ground truth."""
-    pred_n = _normalize(pred)
-    gold_n = _normalize(gold)
-    if pred_n == gold_n:
-        return True
-    # Handle yes/no variants.
-    yes_words = {"yes", "true", "correct", "right"}
-    no_words  = {"no", "false", "incorrect", "wrong"}
-    if gold_n in yes_words and pred_n in yes_words:
-        return True
-    if gold_n in no_words and pred_n in no_words:
-        return True
-    return False
+Is the predicted answer correct? Reply with a single word: yes or no."""
 
 
 # ---------------------------------------------------------------------------
-# BLIP inference
+# LLM judge
+# ---------------------------------------------------------------------------
+
+def _load_judge(judge_model: str, device: str):
+    """Load a small instruction-tuned LLM for answer judging."""
+    from transformers import AutoTokenizer, AutoModelForCausalLM
+
+    logger.info("Loading judge model: %s", judge_model)
+    tokenizer = AutoTokenizer.from_pretrained(judge_model)
+    model = AutoModelForCausalLM.from_pretrained(
+        judge_model, torch_dtype=torch.float16, device_map=device
+    ).eval()
+    return tokenizer, model
+
+
+def _judge_score(
+    tokenizer,
+    judge_model,
+    question: str,
+    gold: str,
+    pred: str,
+    device: str,
+) -> float:
+    """Return probability in [0, 1] that the prediction is correct.
+
+    Uses the log-probability of the 'yes' token vs 'no' token at the first
+    generated position — no sampling needed, just a single forward pass.
+    """
+    prompt = JUDGE_PROMPT.format(question=question, gold=gold, pred=pred)
+
+    # Apply chat template if available, otherwise use raw prompt.
+    if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
+        messages = [{"role": "user", "content": prompt}]
+        text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+    else:
+        text = prompt
+
+    inputs = tokenizer(text, return_tensors="pt").to(device)
+
+    with torch.no_grad():
+        out = judge_model(**inputs)
+        # logits shape: (1, seq_len, vocab_size) — take the last position
+        next_token_logits = out.logits[0, -1, :]
+
+    # Get token IDs for "yes" and "no" (first token of each word).
+    yes_ids = tokenizer.encode("yes", add_special_tokens=False)
+    no_ids  = tokenizer.encode("no",  add_special_tokens=False)
+
+    yes_logit = next_token_logits[yes_ids[0]].float()
+    no_logit  = next_token_logits[no_ids[0]].float()
+
+    # Softmax over just the two options → probability of "yes".
+    score = torch.softmax(torch.stack([yes_logit, no_logit]), dim=0)[0].item()
+    return score
+
+
+# ---------------------------------------------------------------------------
+# BLIP inference + judging
 # ---------------------------------------------------------------------------
 
 def _run_blip_inference(
@@ -75,15 +124,16 @@ def _run_blip_inference(
     image_cache_dir: Path,
     device: str,
     dtype: torch.dtype,
+    judge_model_id: str,
 ) -> list[dict]:
-    """Run BLIP .generate() on each VQA-RAD question.
+    """Run BLIP .generate() on each VQA-RAD question and judge correctness.
 
     HF VQA-RAD records have an "image" key holding a PIL.Image directly.
     Images are cached to disk so downstream feature extraction can open them.
 
     Returns list of dicts with keys:
-        question, gold_answer, blip_answer, label (0=correct, 1=wrong),
-        image_path
+        question, gold_answer, blip_answer, judge_score (0–1),
+        label (0=correct, 1=wrong), image_path
     """
     from transformers import AutoProcessor, AutoModelForImageTextToText
 
@@ -91,9 +141,11 @@ def _run_blip_inference(
 
     logger.info("Loading BLIP model for inference...")
     processor = AutoProcessor.from_pretrained(MODEL_ID)
-    model = AutoModelForImageTextToText.from_pretrained(
+    blip = AutoModelForImageTextToText.from_pretrained(
         MODEL_ID, torch_dtype=dtype
     ).to(device).eval()
+
+    judge_tok, judge_lm = _load_judge(judge_model_id, device)
 
     results = []
     skipped = 0
@@ -117,32 +169,38 @@ def _run_blip_inference(
 
         try:
             image = pil_image.convert("RGB")
-            # Prompt BLIP in QA mode.
             prompt = f"Question: {question} Answer:"
             inputs = processor(images=image, text=prompt, return_tensors="pt")
             inputs = {k: v.to(device) for k, v in inputs.items()}
 
             with torch.no_grad():
-                generated = model.generate(**inputs, max_new_tokens=32)
+                generated = blip.generate(**inputs, max_new_tokens=32)
             blip_answer = processor.decode(generated[0], skip_special_tokens=True)
-            # Strip the prompt from the output if echoed.
             if "Answer:" in blip_answer:
                 blip_answer = blip_answer.split("Answer:")[-1].strip()
 
-            label = 0 if _answers_match(blip_answer, gold) else 1
+            # LLM judge: P(answer is correct) in [0, 1].
+            score = _judge_score(judge_tok, judge_lm, question, gold, blip_answer, device)
+            label = 0 if score >= 0.5 else 1
 
             results.append({
                 "image_path": str(img_cache_path),
                 "question": question,
                 "gold_answer": gold,
                 "blip_answer": blip_answer,
+                "judge_score": round(score, 4),
                 "label": label,
             })
 
-            if (i + 1) % 100 == 0:
+            if (i + 1) % 50 == 0:
                 n_correct = sum(1 for r in results if r["label"] == 0)
-                logger.info("Processed %d / %d  |  BLIP accuracy so far: %.1f%%",
-                            i + 1, len(records), 100 * n_correct / len(results))
+                avg_score = sum(r["judge_score"] for r in results) / len(results)
+                logger.info(
+                    "Processed %d / %d  |  BLIP accuracy: %.1f%%  |  avg judge score: %.3f",
+                    i + 1, len(records),
+                    100 * n_correct / len(results),
+                    avg_score,
+                )
 
         except Exception as e:
             logger.warning("Error on record %d: %s", i, e)
@@ -150,8 +208,10 @@ def _run_blip_inference(
 
     logger.info("Inference done. Skipped %d. Got %d results.", skipped, len(results))
     n_correct = sum(1 for r in results if r["label"] == 0)
-    logger.info("BLIP raw accuracy on these questions: %.1f%% (%d / %d correct)",
-                100 * n_correct / max(len(results), 1), n_correct, len(results))
+    logger.info(
+        "BLIP accuracy (judge-labeled): %.1f%% (%d / %d correct)",
+        100 * n_correct / max(len(results), 1), n_correct, len(results),
+    )
     return results
 
 
@@ -189,7 +249,6 @@ def _extract_features(
             image = Image.open(res["image_path"]).convert("RGB")
             out = vqa_model.forward(image, res["question"], res["blip_answer"])
 
-            # Pool each segment per layer → concatenate (same as training).
             seg_vecs = []
             for layer_idx in LAYERS:
                 acts = out.activations.get(layer_idx)
@@ -248,14 +307,12 @@ def _eval_probe(
         num_classes=1,
     )
     probe = MLPClassifier(cfg).to(device).eval()
-
     probe.load_state_dict(ckpt["model_state_dict"], strict=False)
 
     X = torch.tensor(features, dtype=torch.float32).to(device)
     with torch.no_grad():
         logits = probe(X).squeeze(-1).cpu().numpy()
 
-    # Temperature scaling if available.
     temperature = ckpt.get("temperature", 1.0)
     probs = torch.sigmoid(torch.tensor(logits / temperature)).numpy()
 
@@ -268,7 +325,7 @@ def _eval_probe(
 
     n0 = int((labels == 0).sum())
     n1 = int((labels == 1).sum())
-    logger.info("=== BLIP INFERENCE EVAL (real errors) ===")
+    logger.info("=== BLIP INFERENCE EVAL (judge-labeled) ===")
     logger.info("  Samples: %d correct (0) + %d hallucinated (1)", n0, n1)
     logger.info("  Probe accuracy:  %.4f", acc)
     logger.info("  Probe ROC-AUC:   %.4f", auc)
@@ -288,9 +345,11 @@ def _eval_probe(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Eval probe on BLIP's real outputs")
+    parser = argparse.ArgumentParser(description="Eval probe on BLIP's real outputs (LLM judge)")
     parser.add_argument("--checkpoint", required=True, help="Stage-2 checkpoint .pt")
     parser.add_argument("--output", default="outputs/eval/blip_inference")
+    parser.add_argument("--judge_model", default=DEFAULT_JUDGE,
+                        help=f"HF model ID for LLM judge (default: {DEFAULT_JUDGE})")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--dtype", default="float16", choices=["float16", "float32"])
     parser.add_argument("--max_questions", type=int, default=None,
@@ -302,25 +361,22 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     image_cache_dir = output_dir / "image_cache"
 
-    # Load VQA-RAD questions from HuggingFace test split (clean holdout).
     logger.info("Loading VQA-RAD from HuggingFace (test split)...")
     from datasets import load_dataset
     ds = load_dataset("flaviagiammarino/vqa-rad")
-    # Use the test split — never seen during training.
     records = list(ds["test"])
     if args.max_questions:
         records = records[:args.max_questions]
     logger.info("Using %d VQA-RAD test-split questions", len(records))
 
-    # Step 1: Run BLIP inference.
-    results = _run_blip_inference(records, image_cache_dir, args.device, dtype)
+    # Step 1: Run BLIP inference + LLM judge scoring.
+    results = _run_blip_inference(records, image_cache_dir, args.device, dtype, args.judge_model)
 
-    # Save inference results.
     with open(output_dir / "inference_results.json", "w") as f:
         json.dump(results, f, indent=2)
     logger.info("Saved inference results to %s", output_dir / "inference_results.json")
 
-    # Step 2: Extract features.
+    # Step 2: Extract BLIP hidden-state features.
     features, labels = _extract_features(results, args.device, dtype)
     np.save(output_dir / "features.npy", features)
     np.save(output_dir / "labels.npy", labels)
