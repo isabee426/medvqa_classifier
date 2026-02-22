@@ -234,17 +234,20 @@ def _eval_probe(
     device: str,
 ) -> dict:
     """Load Stage-2 probe checkpoint and evaluate on the features."""
-    from medvqa_probe.models.mlp_probe import MLPProbe
+    from medvqa_probe.models.mlp_classifier import MLPClassifier
+    from medvqa_probe.utils.config import ClassifierConfig
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     classifier_cfg = ckpt.get("classifier_config", {})
 
-    probe = MLPProbe(
+    cfg = ClassifierConfig(
         input_dim=features.shape[1],
         hidden_dim=classifier_cfg.get("hidden_dim", 512),
         num_layers=classifier_cfg.get("num_layers", 3),
         dropout=classifier_cfg.get("dropout", 0.30),
-    ).to(device).eval()
+        num_classes=1,
+    )
+    probe = MLPClassifier(cfg).to(device).eval()
 
     probe.load_state_dict(ckpt["model_state_dict"], strict=False)
 
