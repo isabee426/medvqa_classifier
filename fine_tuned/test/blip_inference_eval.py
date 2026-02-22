@@ -14,7 +14,6 @@ This is the most principled eval: no synthetic labels, real model errors.
 Usage:
     python -m fine_tuned.test.blip_inference_eval \
         --checkpoint outputs/checkpoints/stage2_hallucination/best_model.pt \
-        --images data/VQA_RAD_Image_Folder \
         --output outputs/eval/blip_inference \
         --device cuda
 """
@@ -73,17 +72,22 @@ def _answers_match(pred: str, gold: str) -> bool:
 
 def _run_blip_inference(
     records: list[dict],
-    images_dir: Path,
+    image_cache_dir: Path,
     device: str,
     dtype: torch.dtype,
 ) -> list[dict]:
     """Run BLIP .generate() on each VQA-RAD question.
+
+    HF VQA-RAD records have an "image" key holding a PIL.Image directly.
+    Images are cached to disk so downstream feature extraction can open them.
 
     Returns list of dicts with keys:
         question, gold_answer, blip_answer, label (0=correct, 1=wrong),
         image_path
     """
     from transformers import AutoProcessor, AutoModelForImageTextToText
+
+    image_cache_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Loading BLIP model for inference...")
     processor = AutoProcessor.from_pretrained(MODEL_ID)
@@ -94,21 +98,25 @@ def _run_blip_inference(
     results = []
     skipped = 0
     for i, rec in enumerate(records):
-        img_name = rec.get("image_name", rec.get("image", ""))
-        img_path = images_dir / img_name
-        if not img_path.exists():
-            img_path = images_dir / img_name.replace(".jpg", ".png")
-        if not img_path.exists():
+        # HF dataset stores image as PIL.Image under "image" key.
+        pil_image = rec.get("image")
+        if pil_image is None:
             skipped += 1
             continue
 
         question = str(rec.get("question", ""))
         gold = str(rec.get("answer", ""))
         if not question or not gold:
+            skipped += 1
             continue
 
+        # Cache image to disk so _extract_features can reload it.
+        img_cache_path = image_cache_dir / f"vqarad_test_{i}.jpg"
+        if not img_cache_path.exists():
+            pil_image.convert("RGB").save(str(img_cache_path))
+
         try:
-            image = Image.open(img_path).convert("RGB")
+            image = pil_image.convert("RGB")
             # Prompt BLIP in QA mode.
             prompt = f"Question: {question} Answer:"
             inputs = processor(images=image, text=prompt, return_tensors="pt")
@@ -124,7 +132,7 @@ def _run_blip_inference(
             label = 0 if _answers_match(blip_answer, gold) else 1
 
             results.append({
-                "image_path": str(img_path),
+                "image_path": str(img_cache_path),
                 "question": question,
                 "gold_answer": gold,
                 "blip_answer": blip_answer,
@@ -140,7 +148,7 @@ def _run_blip_inference(
             logger.warning("Error on record %d: %s", i, e)
             continue
 
-    logger.info("Inference done. Skipped %d (no image). Got %d results.", skipped, len(results))
+    logger.info("Inference done. Skipped %d. Got %d results.", skipped, len(results))
     n_correct = sum(1 for r in results if r["label"] == 0)
     logger.info("BLIP raw accuracy on these questions: %.1f%% (%d / %d correct)",
                 100 * n_correct / max(len(results), 1), n_correct, len(results))
@@ -157,7 +165,6 @@ def _extract_features(
     dtype: torch.dtype,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Extract probe features for each (image, question, blip_answer) triple."""
-    from transformers import AutoProcessor, AutoModelForImageTextToText
     from medvqa_probe.models.base_vqa_model import HFVLMModel
     from medvqa_probe.utils.config import ExtractionConfig
 
@@ -228,7 +235,6 @@ def _eval_probe(
 ) -> dict:
     """Load Stage-2 probe checkpoint and evaluate on the features."""
     from medvqa_probe.models.mlp_probe import MLPProbe
-    from medvqa_probe.utils.config import ClassifierConfig
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     classifier_cfg = ckpt.get("classifier_config", {})
@@ -268,8 +274,8 @@ def _eval_probe(
     return {
         "n_correct_blip": n0,
         "n_hallucinated_blip": n1,
-        "probe_accuracy": acc,
-        "probe_roc_auc": auc,
+        "probe_accuracy": float(acc),
+        "probe_roc_auc": float(auc),
         "majority_baseline": max(n0, n1) / (n0 + n1),
     }
 
@@ -281,7 +287,6 @@ def _eval_probe(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Eval probe on BLIP's real outputs")
     parser.add_argument("--checkpoint", required=True, help="Stage-2 checkpoint .pt")
-    parser.add_argument("--images", required=True, help="VQA-RAD image folder")
     parser.add_argument("--output", default="outputs/eval/blip_inference")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--dtype", default="float16", choices=["float16", "float32"])
@@ -290,9 +295,9 @@ def main() -> None:
     args = parser.parse_args()
 
     dtype = torch.float16 if args.dtype == "float16" else torch.float32
-    images_dir = Path(args.images)
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+    image_cache_dir = output_dir / "image_cache"
 
     # Load VQA-RAD questions from HuggingFace test split (clean holdout).
     logger.info("Loading VQA-RAD from HuggingFace (test split)...")
@@ -305,7 +310,7 @@ def main() -> None:
     logger.info("Using %d VQA-RAD test-split questions", len(records))
 
     # Step 1: Run BLIP inference.
-    results = _run_blip_inference(records, images_dir, args.device, dtype)
+    results = _run_blip_inference(records, image_cache_dir, args.device, dtype)
 
     # Save inference results.
     with open(output_dir / "inference_results.json", "w") as f:
