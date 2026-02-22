@@ -28,4 +28,4 @@ training:
   noise_std: 0.02
   seed: 0
   num_workers: 0
-  device: cpu
+  device: cuda

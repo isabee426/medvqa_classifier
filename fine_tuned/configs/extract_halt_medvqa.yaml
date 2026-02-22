@@ -23,7 +23,7 @@ extraction:
   layers: [2, 6, 10]  # must match Stage-1 (BLIP has layers 0-11)
   segments: [vision, question, answer]
   pooling: mean
-  device: cpu
-  dtype: float32
-  batch_size: 1
+  device: cuda
+  dtype: float16
+  batch_size: 32
   save_every_n: 50
