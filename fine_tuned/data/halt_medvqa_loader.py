@@ -4,9 +4,19 @@ HALT-MedVQA hallucination scenarios:
   - FAKE: nonsensical questions; correct answer = "I do not know"
   - SWAP: image swapped with unrelated one; correct answer = "I do not know"
 
-For each record we construct:
-  - Faithful triple (label=0): image + question + correct_answer ("I do not know")
-  - Hallucinated triple (label=1): image + question + wrong_option
+Labeling scheme (bidirectional hallucination detection):
+  label=0 (correct):
+    - HALT impossible question + "I do not know"   (correctly abstains)
+    - Non-HALT VQA-RAD question + correct answer    (correctly answers)
+  label=1 (hallucinated):
+    - HALT impossible question + specific answer     (hallucinates instead of IDK)
+    - Non-HALT VQA-RAD question + "I do not know"   (refuses when it should know)
+
+This gives a perfectly balanced 50/50 dataset (1:1 per source) and forces the
+classifier to detect BOTH hallucination directions:
+  1. Model makes up answers when it should say "I do not know"
+  2. Model says "I do not know" when it should provide a real answer
+Factual accuracy (wrong answers) is handled separately at RL training time.
 
 If VQA-RAD images are not locally available, falls back to synthetic
 hallucination labels using VQA-RAD from HuggingFace.
@@ -33,6 +43,9 @@ HALT_GITHUB_URLS = {
     "fake": "https://raw.githubusercontent.com/knowlab/halt-medvqa/main/data/fake_qa_shuffle.json",
     "swap": "https://raw.githubusercontent.com/knowlab/halt-medvqa/main/data/swap_img_shuffle.json",
 }
+
+# Original VQA-RAD dataset JSON (correct Q/A pairs with image filenames).
+VQARAD_JSON_URL = "https://files.osf.io/v1/resources/89kps/providers/osfstorage/5b213a9886d8510012c26c09"
 
 
 def _stable_id(prefix: str, scenario: str, index: int, suffix: str = "") -> str:
@@ -70,6 +83,87 @@ def _filter_vqarad(records: list[dict]) -> list[dict]:
     filtered = [r for r in records if r.get("img", "").startswith("synpic")]
     logger.info("Filtered to %d VQA-RAD (synpic) records out of %d total", len(filtered), len(records))
     return filtered
+
+
+def _load_vqarad_pairs(
+    cache_dir: Path,
+    images_dir: Path,
+    rng: random.Random,
+    max_questions: int | None = None,
+) -> list[tuple[Example, int]]:
+    """Load original VQA-RAD Q/A pairs with bidirectional labels.
+
+    For each VQA-RAD question (capped to max_questions):
+      - (question, correct_answer)  → label=0  (correctly answers)
+      - (question, "I do not know") → label=1  (wrongly abstains)
+
+    Downloads VQA_RAD Dataset Public.json from OSF.
+    """
+    cached = cache_dir / "VQA_RAD_Dataset_Public.json"
+    if cached.exists():
+        logger.info("Using cached VQA-RAD JSON: %s", cached)
+        with open(cached) as f:
+            data = json.load(f)
+    else:
+        import urllib.request
+        logger.info("Downloading VQA-RAD dataset JSON from OSF...")
+        with urllib.request.urlopen(VQARAD_JSON_URL) as resp:
+            raw = resp.read().decode("utf-8")
+        data = json.loads(raw)
+        with open(cached, "w") as f:
+            f.write(raw)
+
+    # Shuffle and cap upfront — no point running BLIP on examples we'll discard.
+    rng.shuffle(data)
+    if max_questions is not None:
+        data = data[:max_questions]
+
+    pairs: list[tuple[Example, int]] = []
+    for i, rec in enumerate(data):
+        img_name = rec.get("image_name", rec.get("image", ""))
+        img_path = images_dir / img_name
+        if not img_path.exists():
+            img_path = images_dir / img_name.replace(".jpg", ".png")
+        if not img_path.exists():
+            continue
+
+        question = str(rec.get("question", ""))
+        answer = str(rec.get("answer", ""))
+        if not question or not answer:
+            continue
+
+        split = "train" if rng.random() < 0.7 else "test"
+
+        # label=0: correct answer (model should know and does)
+        pairs.append((
+            Example(
+                id=_stable_id("vqarad", "correct", i),
+                image_path=str(img_path),
+                question=question,
+                answer=answer,
+                split=split,
+                dataset_name="halt-medvqa",
+                meta={"halt_scenario": "original", "hallucination_type": "none"},
+            ),
+            0,
+        ))
+
+        # label=1: "I do not know" (model should know but falsely abstains)
+        pairs.append((
+            Example(
+                id=_stable_id("vqarad", "idk", i),
+                image_path=str(img_path),
+                question=question,
+                answer="I do not know",
+                split=split,
+                dataset_name="halt-medvqa",
+                meta={"halt_scenario": "original", "hallucination_type": "false_abstention"},
+            ),
+            1,
+        ))
+
+    logger.info("Loaded %d VQA-RAD pairs: %d correct (0) + %d IDK (1)", len(pairs), len(pairs) // 2, len(pairs) // 2)
+    return pairs
 
 
 def _pick_wrong_option(record: dict) -> str:
@@ -172,6 +266,19 @@ def _load_from_halt_github(
                 ),
                 1,
             ))
+
+    # Add original VQA-RAD correct Q/A pairs as faithful (label=0).
+    # This ensures the classifier sees real medical answers on both sides,
+    # not just "I do not know" vs specific medical terms.
+    # Cap VQA-RAD questions to match HALT count — no need to process more.
+    n_halt = len(pairs) // 2  # pairs so far are 1:1 HALT faithful/hallucinated
+    correct_pairs = _load_vqarad_pairs(cache_dir, images_dir, rng, max_questions=n_halt)
+    pairs.extend(correct_pairs)
+
+    # Data is balanced by construction: each source generates 1 label=0 + 1 label=1 per question.
+    n0 = sum(1 for _, l in pairs if l == 0)
+    n1 = sum(1 for _, l in pairs if l == 1)
+    logger.info("Dataset: %d faithful (0) + %d hallucinated (1)", n0, n1)
 
     # Subsample if configured.
     if cfg.max_examples_per_split:
