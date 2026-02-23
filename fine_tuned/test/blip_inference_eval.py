@@ -80,14 +80,14 @@ def _judge_score(
     pred: str,
     device: str,
 ) -> float:
-    """Return probability in [0, 1] that the prediction is correct.
+    """Return 1.0 if the judge says correct, 0.0 if incorrect.
 
-    Uses the log-probability of the 'yes' token vs 'no' token at the first
-    generated position — no sampling needed, just a single forward pass.
+    Generates up to 5 tokens greedily and checks whether the response
+    starts with 'yes'. This avoids tokenizer-specific token ID issues
+    that break the logit-comparison approach.
     """
     prompt = JUDGE_PROMPT.format(question=question, gold=gold, pred=pred)
 
-    # Apply chat template if available, otherwise use raw prompt.
     if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
         messages = [{"role": "user", "content": prompt}]
         text = tokenizer.apply_chat_template(
@@ -97,22 +97,21 @@ def _judge_score(
         text = prompt
 
     inputs = tokenizer(text, return_tensors="pt").to(device)
+    input_len = inputs["input_ids"].shape[1]
 
     with torch.no_grad():
-        out = judge_model(**inputs)
-        # logits shape: (1, seq_len, vocab_size) — take the last position
-        next_token_logits = out.logits[0, -1, :]
+        out = judge_model.generate(
+            **inputs,
+            max_new_tokens=5,
+            do_sample=False,
+            pad_token_id=tokenizer.eos_token_id,
+        )
 
-    # Get token IDs for "yes" and "no" (first token of each word).
-    yes_ids = tokenizer.encode("yes", add_special_tokens=False)
-    no_ids  = tokenizer.encode("no",  add_special_tokens=False)
+    response = tokenizer.decode(
+        out[0][input_len:], skip_special_tokens=True
+    ).strip().lower()
 
-    yes_logit = next_token_logits[yes_ids[0]].float()
-    no_logit  = next_token_logits[no_ids[0]].float()
-
-    # Softmax over just the two options → probability of "yes".
-    score = torch.softmax(torch.stack([yes_logit, no_logit]), dim=0)[0].item()
-    return score
+    return 1.0 if response.startswith("yes") else 0.0
 
 
 # ---------------------------------------------------------------------------
