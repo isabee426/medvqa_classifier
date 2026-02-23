@@ -71,6 +71,20 @@ def _load_judge(judge_model: str, device: str):
     return model
 
 
+def _sanitize(text: str, max_chars: int = 512) -> str:
+    """Strip special tokens and control characters, cap length."""
+    import re
+    # Remove anything that looks like a special token (<xxx>)
+    text = re.sub(r"<[^>]{1,20}>", "", text)
+    # Remove non-printable / control characters
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text)
+    text = text.strip()
+    # Fallback for empty string after sanitization
+    if not text:
+        text = "unknown"
+    return text[:max_chars]
+
+
 def _judge_score(
     judge_model,
     image_path: str,
@@ -86,6 +100,10 @@ def _judge_score(
 
     Returns R in [0, 1]. R > 0 means pred scored better than gold.
     """
+    question = _sanitize(question, max_chars=256)
+    gold     = _sanitize(gold,     max_chars=256)
+    pred     = _sanitize(pred,     max_chars=256)
+
     chat_pred = [
         {"role": "user",      "content": "<ImageHere>" + question},
         {"role": "assistant", "content": pred},
