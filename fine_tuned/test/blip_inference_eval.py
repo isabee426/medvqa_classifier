@@ -296,8 +296,17 @@ def _eval_probe(
     from medvqa_probe.models.mlp_classifier import MLPClassifier
     from medvqa_probe.utils.config import ClassifierConfig
 
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    classifier_cfg = ckpt.get("classifier_config", {})
+    raw = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    # Training saves either a bare state_dict or a wrapped dict.
+    if isinstance(raw, dict) and "model_state_dict" in raw:
+        state_dict = raw["model_state_dict"]
+        classifier_cfg = raw.get("classifier_config", {})
+        temperature = raw.get("temperature", 1.0)
+    else:
+        state_dict = raw
+        classifier_cfg = {}
+        temperature = 1.0
 
     cfg = ClassifierConfig(
         input_dim=features.shape[1],
@@ -307,13 +316,11 @@ def _eval_probe(
         num_classes=1,
     )
     probe = MLPClassifier(cfg).to(device).eval()
-    probe.load_state_dict(ckpt["model_state_dict"], strict=False)
+    probe.load_state_dict(state_dict, strict=False)
 
     X = torch.tensor(features, dtype=torch.float32).to(device)
     with torch.no_grad():
         logits = probe(X).squeeze(-1).cpu().numpy()
-
-    temperature = ckpt.get("temperature", 1.0)
     probs = torch.sigmoid(torch.tensor(logits / temperature)).numpy()
 
     preds = (probs >= 0.5).astype(int)
