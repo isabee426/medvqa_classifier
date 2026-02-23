@@ -65,6 +65,7 @@ def _load_judge(judge_model: str, device: str):
         config=config,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
+        low_cpu_mem_usage=False,  # model __init__ loads CLIP internally; meta device breaks this
     ).to(device).eval()
     model.tokenizer = tokenizer
     return model
