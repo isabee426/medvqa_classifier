@@ -116,7 +116,7 @@ def _judge_score(
 
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         scores = judge_model.get_scores(
-            [chat_pred, chat_gold], [image, image], hd_num=4
+            [chat_pred, chat_gold], [image, image], hd_num=9
         )
 
     s_pred, s_gold = scores[0], scores[1]
