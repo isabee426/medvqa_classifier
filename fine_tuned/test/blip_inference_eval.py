@@ -50,12 +50,19 @@ BETA = 1.0  # smoothing parameter from paper
 
 def _load_judge(judge_model: str, device: str):
     """Load InternLM-XComposer2.5-Reward model."""
-    from transformers import AutoModel, AutoTokenizer
+    from transformers import AutoModel, AutoTokenizer, AutoConfig
 
     logger.info("Loading reward model: %s", judge_model)
     tokenizer = AutoTokenizer.from_pretrained(judge_model, trust_remote_code=True)
+
+    # The model's __init__ reads config.max_length which may not be set.
+    config = AutoConfig.from_pretrained(judge_model, trust_remote_code=True)
+    if not hasattr(config, "max_length"):
+        config.max_length = 4096
+
     model = AutoModel.from_pretrained(
         judge_model,
+        config=config,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     ).to(device).eval()
