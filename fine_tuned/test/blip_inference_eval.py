@@ -95,12 +95,14 @@ def _judge_score(
 
     s_pred, s_gold = scores[0], scores[1]
 
-    if s_pred > s_gold:
-        reward = 1.0 - math.exp(-(s_pred - s_gold) * BETA)
+    diff = s_pred - s_gold
+    # Paper formula for continuous reward (used for logging).
+    if diff > 0:
+        reward = 1.0 - math.exp(-diff * BETA)
     else:
         reward = 0.0
 
-    return reward
+    return s_pred, s_gold, reward
 
 
 # ---------------------------------------------------------------------------
@@ -163,15 +165,19 @@ def _run_blip_inference(
             if "Answer:" in blip_answer:
                 blip_answer = blip_answer.split("Answer:")[-1].strip()
 
-            # Reward model: R in [0,1], R>0 means pred beat gold.
-            reward = _judge_score(judge, str(img_cache_path), question, gold, blip_answer)
-            label = 0 if reward > 0 else 1
+            # Reward model: label=0 (correct) if pred scores >= gold.
+            s_pred, s_gold, reward = _judge_score(
+                judge, str(img_cache_path), question, gold, blip_answer
+            )
+            label = 0 if s_pred >= s_gold else 1
 
             results.append({
                 "image_path": str(img_cache_path),
                 "question": question,
                 "gold_answer": gold,
                 "blip_answer": blip_answer,
+                "score_pred": round(float(s_pred), 4),
+                "score_gold": round(float(s_gold), 4),
                 "reward": round(reward, 4),
                 "label": label,
             })
