@@ -379,27 +379,50 @@ def main() -> None:
     parser.add_argument("--dtype", default="float16", choices=["float16", "float32"])
     parser.add_argument("--max_questions", type=int, default=None,
                         help="Cap number of questions (default: all)")
+    parser.add_argument("--skip_inference", action="store_true",
+                        help="Skip BLIP inference; load existing inference_results.json instead. "
+                             "Use this on the second run after inference completes to avoid "
+                             "CUDA context corruption carrying over into feature extraction.")
     args = parser.parse_args()
 
     dtype = torch.float16 if args.dtype == "float16" else torch.float32
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
     image_cache_dir = output_dir / "image_cache"
-
-    logger.info("Loading VQA-RAD from HuggingFace (test split)...")
-    from datasets import load_dataset
-    ds = load_dataset("flaviagiammarino/vqa-rad")
-    records = list(ds["test"])
-    if args.max_questions:
-        records = records[:args.max_questions]
-    logger.info("Using %d VQA-RAD test-split questions", len(records))
+    inference_cache = output_dir / "inference_results.json"
 
     # Step 1: BLIP inference + reward model scoring.
-    results = _run_blip_inference(records, image_cache_dir, args.device, dtype, args.judge_model)
+    # Run this phase alone first; any CUDA device-side assert in the reward model
+    # corrupts the GPU context for the whole process. A second invocation with
+    # --skip_inference starts fresh and loads from the saved JSON.
+    if args.skip_inference:
+        if not inference_cache.exists():
+            raise FileNotFoundError(
+                f"--skip_inference set but {inference_cache} not found. "
+                "Run without --skip_inference first."
+            )
+        logger.info("Loading cached inference results from %s", inference_cache)
+        with open(inference_cache) as f:
+            results = json.load(f)
+        logger.info("Loaded %d inference results", len(results))
+    else:
+        logger.info("Loading VQA-RAD from HuggingFace (test split)...")
+        from datasets import load_dataset
+        ds = load_dataset("flaviagiammarino/vqa-rad")
+        records = list(ds["test"])
+        if args.max_questions:
+            records = records[:args.max_questions]
+        logger.info("Using %d VQA-RAD test-split questions", len(records))
 
-    with open(output_dir / "inference_results.json", "w") as f:
-        json.dump(results, f, indent=2)
-    logger.info("Saved inference results to %s", output_dir / "inference_results.json")
+        results = _run_blip_inference(records, image_cache_dir, args.device, dtype, args.judge_model)
+
+        with open(inference_cache, "w") as f:
+            json.dump(results, f, indent=2)
+        logger.info("Saved inference results to %s", inference_cache)
+        logger.info(
+            "Re-run with --skip_inference to continue to feature extraction "
+            "in a fresh process (avoids CUDA context corruption)."
+        )
 
     # Step 2: Extract BLIP hidden-state features.
     features, labels = _extract_features(results, args.device, dtype)
