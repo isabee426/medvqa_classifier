@@ -33,7 +33,8 @@ from medvqa_probe.utils.logging import setup_logging
 
 logger = setup_logging(name=__name__)
 
-MODEL_ID = "Salesforce/blip-image-captioning-base"
+MODEL_ID = "Salesforce/blip-image-captioning-base"   # probe feature extraction
+VQA_MODEL_ID = "Salesforce/blip-vqa-base"            # VQA answer generation
 LAYERS = [2, 6, 10]
 TOKEN_F1_THRESHOLD = 0.5  # token-level F1 threshold for "correct"
 
@@ -92,20 +93,22 @@ def _run_blip_inference(
     device: str,
     dtype: torch.dtype,
 ) -> list[dict]:
-    """Run BLIP .generate() on each VQA-RAD question and score with text matching.
+    """Run BLIP-VQA on each VQA-RAD question and score with text matching.
+
+    Uses blip-vqa-base for answer generation (trained for VQA, not captioning).
 
     Returns list of dicts with keys:
         question, gold_answer, blip_answer, token_f1,
         label (0=correct, 1=hallucinated), image_path
     """
-    from transformers import AutoProcessor, AutoModelForImageTextToText
+    from transformers import BlipProcessor, BlipForQuestionAnswering
 
     image_cache_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Loading BLIP model for inference...")
-    processor = AutoProcessor.from_pretrained(MODEL_ID)
-    blip = AutoModelForImageTextToText.from_pretrained(
-        MODEL_ID, torch_dtype=dtype
+    logger.info("Loading BLIP-VQA model for inference: %s", VQA_MODEL_ID)
+    processor = BlipProcessor.from_pretrained(VQA_MODEL_ID)
+    blip = BlipForQuestionAnswering.from_pretrained(
+        VQA_MODEL_ID, torch_dtype=dtype
     ).to(device).eval()
 
     results = []
@@ -129,15 +132,12 @@ def _run_blip_inference(
 
         try:
             image = pil_image.convert("RGB")
-            prompt = f"Question: {question} Answer:"
-            inputs = processor(images=image, text=prompt, return_tensors="pt")
+            inputs = processor(images=image, text=question, return_tensors="pt")
             inputs = {k: v.to(device) for k, v in inputs.items()}
 
             with torch.no_grad():
                 generated = blip.generate(**inputs, max_new_tokens=32)
             blip_answer = processor.decode(generated[0], skip_special_tokens=True)
-            if "Answer:" in blip_answer:
-                blip_answer = blip_answer.split("Answer:")[-1].strip()
 
             is_correct, f1 = _score_answer(blip_answer, gold)
             label = 0 if is_correct else 1
