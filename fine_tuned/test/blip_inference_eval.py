@@ -310,6 +310,8 @@ def _eval_probe(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    global TOKEN_F1_THRESHOLD
+
     parser = argparse.ArgumentParser(description="Eval probe on BLIP's real outputs")
     parser.add_argument("--checkpoint", required=True, help="Stage-2 checkpoint .pt")
     parser.add_argument("--output", default="outputs/eval/blip_inference")
@@ -329,8 +331,6 @@ def main() -> None:
     image_cache_dir = output_dir / "image_cache"
     inference_cache = output_dir / "inference_results.json"
 
-    # Override the global threshold if user specified one.
-    global TOKEN_F1_THRESHOLD
     TOKEN_F1_THRESHOLD = args.f1_threshold
 
     # Step 1: BLIP inference + text-based scoring.
